@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Hero: Parkinson's Therapy Edition</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #050510;
+      color: white;
+      font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+    canvas {
+      box-shadow: 0 0 50px rgba(0, 200, 255, 0.15);
+      border: 2px solid #334;
+      border-radius: 16px;
+      display: none;
+    }
+    #loading {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      background: rgba(10, 15, 30, 0.95);
+      padding: 40px;
+      border: 1px solid #0ff;
+      border-radius: 15px;
+      z-index: 999;
+    }
+    .spinner {
+      border: 4px solid #222;
+      border-top: 4px solid #0ff;
+      border-radius: 50%;
+      width: 40px; height: 40px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 20px;
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+  
+  <!-- P5.js -->
+  <script src="https://unpkg.com/p5@1.9.0/lib/p5.min.js"></script>
+  <script src="https://unpkg.com/p5@1.9.0/lib/addons/p5.sound.min.js"></script>
+
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner"></div>
+    <div style="font-size: 20px; font-weight: bold; color: #0ff;">系統啟動中...</div>
+    <div style="color: #888; margin-top:10px; font-size: 14px;">請允許麥克風權限</div>
+  </div>
+
+  <script>
+    // ==========================================
+    // 全域設定
+    // ==========================================
+    let mic;
+    let gameState = "START"; 
+    const W = 1024;
+    const H = 768;
+    
+    // 音訊變數
+    let micLevel = 0;
+    let dbSimulated = 0;
+    const THRESHOLD = 40; // 統一觸發門檻
+
+    // 視覺變數
+    let particles = [];
+    let stars = [];
+    let gridOffset = 0;
+
+    // L1 變數
+    let l1_phase = 0; 
+    let l1_robots = [];
+    let l1_turretAngle = 0;
+    let l1_turretDir = 1;
+    let l1_msg = "";
+    
+    // L2 變數
+    let l2_phase = 0; 
+    let l2_timer = 0; 
+    let l2_balloonSize = 50;
+    let l2_targetTime = 8;
+    let l2_silenceCount = 0; // 斷氣計時
+    const SILENCE_LIMIT = 0.1; // 100ms 容錯
+
+    // L3 變數
+    let l3_phase = 0; 
+    let l3_bpm = 60;
+    let l3_startTime = 0;
+    let l3_lyrics = ["三輪車 跑得快", "上面坐個 老太太", "要五毛 給一塊", "你說奇怪 不奇怪"];
+    let l3_lastBeatIdx = -1;
+    // 語音起始偵測與準確度
+    let l3_isSpeaking = false;
+    let l3_missCount = 0; // 連續錯誤計數
+    let l3_feedback = ""; // 顯示給使用者的即時回饋
+    let l3_feedbackColor;
+
+    // ==========================================
+    // P5.js Core
+    // ==========================================
+    function setup() {
+      let cnv = createCanvas(W, H);
+      cnv.style('display', 'block');
+      document.getElementById('loading').style.display = 'none';
+      
+      mic = new p5.AudioIn();
+      textAlign(CENTER, CENTER);
+      rectMode(CENTER);
+      textFont('Microsoft JhengHei');
+      
+      for(let i=0; i<60; i++) stars.push({x:random(W), y:random(H), s:random(1,3)});
+      l3_feedbackColor = color(255);
+    }
+
+    function draw() {
+      // 1. Audio Processing
+      if (gameState !== "START" && mic) {
+        try {
+          let vol = mic.getLevel();
+          micLevel = lerp(micLevel, vol, 0.1);
+          if (vol > 0.001) {
+            // Map 0.001~0.5 to 30~100 dB roughly
+            let rawDB = map(Math.log10(vol), -3, -0.5, 30, 100);
+            dbSimulated = constrain(rawDB, 0, 110);
+          } else {
+            dbSimulated = lerp(dbSimulated, 10, 0.1);
+          }
+        } catch(e) { dbSimulated = 0; }
+      }
+
+      // 2. Background
+      drawSciFiBackground();
+
+      // 3. Game States
+      switch(gameState) {
+        case "START": drawStartScreen(); break;
+        case "MENU": drawMenuScreen(); break;
+        case "L1": drawLevel1(); break;
+        case "L2": drawLevel2(); break;
+        case "L3": drawLevel3(); break;
+        case "END": drawEndScreen(); break;
+      }
+      
+      updateParticles();
+    }
+
+    // ==========================================
+    // Visual Components
+    // ==========================================
+    function drawSciFiBackground() {
+      background(10, 12, 20);
+      noStroke(); fill(255, 255, 255, 180);
+      for(let s of stars) ellipse(s.x, s.y, s.s);
+
+      stroke(0, 255, 255, 40); strokeWeight(1);
+      gridOffset = (gridOffset + 0.8) % 40;
+      for(let x = 0; x <= W; x+=80) line(x, H/2, (x-W/2)*3 + W/2, H);
+      for(let y = H/2; y < H; y+=40) {
+        let py = y + gridOffset;
+        if(py < H) line(0, py, W, py);
+      }
+    }
+
+    function drawNeonGoal(txt, subTxt, phaseColor) {
+      // 畫面上方霓虹燈告示牌
+      push();
+      translate(W/2, 60);
+      
+      // 外框發光
+      drawingContext.shadowBlur = 20;
+      drawingContext.shadowColor = phaseColor;
+      stroke(phaseColor); strokeWeight(2); fill(0, 0, 0, 200);
+      rect(0, 0, 500, 70, 10);
+      
+      // 文字
+      noStroke(); fill(phaseColor);
+      textSize(28); textStyle(BOLD);
+      text(txt, 0, -10);
+      
+      fill(255); textSize(16); textStyle(NORMAL);
+      drawingContext.shadowBlur = 0; 
+      text(subTxt, 0, 20);
+      pop();
+    }
+
+    function drawDBMeter(x, y) {
+      textAlign(LEFT); textSize(14); fill(180);
+      text(`VOICE: ${nf(dbSimulated, 2, 1)} dB`, x - 150, y - 20);
+      
+      noFill(); stroke(80); strokeWeight(2);
+      rect(x, y, 300, 16, 4);
+      
+      noStroke();
+      let w = map(dbSimulated, 0, 100, 0, 296);
+      w = constrain(w, 0, 296);
+      
+      if(dbSimulated < THRESHOLD) fill(100); 
+      else if(dbSimulated < 50) fill(0, 255, 0); 
+      else if(dbSimulated < 60) fill(255, 255, 0); 
+      else fill(255, 0, 0); 
+      
+      rectMode(CORNER); rect(x - 148, y - 6, w, 12, 2);
+      
+      // 閾值線 40dB
+      stroke(255); strokeWeight(2);
+      let tx = map(THRESHOLD, 0, 100, 0, 300);
+      line(x - 150 + tx, y - 10, x - 150 + tx, y + 10);
+      
+      rectMode(CENTER); textAlign(CENTER);
+    }
+
+    function drawButton(label, x, y, w, h, c) {
+      let isHover = mouseX > x - w/2 && mouseX < x + w/2 && mouseY > y - h/2 && mouseY < y + h/2;
+      if(isHover) {
+        stroke(c); strokeWeight(3); fill(c);
+        drawingContext.shadowBlur = 20; drawingContext.shadowColor = c;
+      } else {
+        stroke(c); strokeWeight(2); fill(0,0,0, 150);
+        drawingContext.shadowBlur = 0;
+      }
+      rect(x, y, w, h, 10);
+      drawingContext.shadowBlur = 0; 
+      fill(isHover ? 0 : 255); noStroke(); textSize(22); text(label, x, y);
+      return isHover && mouseIsPressed;
+    }
+
+    function drawBackButton() {
+      if(drawButton("EXIT", 60, 40, 80, 40, "#666")) { gameState = "MENU"; }
+    }
+
+    // ==========================================
+    // Game Logic
+    // ==========================================
+    
+    function drawStartScreen() {
+      fill(0, 255, 255); textSize(60); textStyle(BOLD);
+      let floatY = sin(frameCount * 0.05) * 5;
+      text("VOICE HERO", W/2, H/3 + floatY);
+      fill(255); textSize(26); textStyle(NORMAL);
+      text("Parkinson's Therapy Edition", W/2, H/3 + 60 + floatY);
+      fill(150); textSize(16); text("請確認麥克風已開啟", W/2, H - 150);
+      
+      if (drawButton("START GAME", W/2, H/2 + 50, 250, 60, "#0ff")) {
+        userStartAudio().then(() => { mic.start(); gameState = "MENU"; })
+        .catch(() => gameState = "MENU"); 
+      }
+    }
+
+    function drawMenuScreen() {
+      fill(255); textSize(40); text("訓練任務選擇", W/2, 100);
+      drawDBMeter(W/2, 160);
+
+      if(drawButton("L1: Loud (音量)", W/2, 280, 400, 80, "#0f0")) { initLevel1(); gameState = "L1"; }
+      if(drawButton("L2: Long (長音)", W/2, 400, 400, 80, "#ff0")) { initLevel2(); gameState = "L2"; }
+      if(drawButton("L3: Speed (語速)", W/2, 520, 400, 80, "#f0f")) { initLevel3(); gameState = "L3"; }
+    }
+    
+    function drawEndScreen() {
+      if(frameCount%5==0) createParticle(random(W), random(H), color(random(255),255,255), 10);
+      textSize(50); fill(0, 255, 0); text("🎉 訓練完成 🎉", W/2, H/3);
+      if(drawButton("返回主選單", W/2, H-150, 200, 60, "#fff")) gameState = "MENU";
+    }
+
+    // ---------------------------------------
+    // Level 1: Loud Challenge
+    // ---------------------------------------
+    function initLevel1() { l1_phase = 0; setupL1Robots(); }
+    
+    function setupL1Robots() {
+      l1_robots = [];
+      let cVal, yPos;
+      // 三階段配置
+      if(l1_phase==0) { cVal=color(0,255,0); yPos=H/2; }
+      else if(l1_phase==1) { cVal=color(255,255,0); yPos=H/2-100; }
+      else { cVal=color(255,50,50); yPos=H/2-200; }
+      
+      for(let i=0; i<3; i++) l1_robots.push({x: W/2-150+i*150, y: yPos, c: cVal, active: true});
+    }
+
+    function drawLevel1() {
+      // 1. 判斷當前階段目標
+      let targetMin, targetMax, labelColor;
+      let goalText = "";
+      
+      if(l1_phase === 0) { targetMin=40; targetMax=50; labelColor="#0f0"; goalText="目標：40 - 50 dB"; }
+      else if(l1_phase === 1) { targetMin=50; targetMax=60; labelColor="#ff0"; goalText="目標：50 - 60 dB"; }
+      else { targetMin=60; targetMax=110; labelColor="#f00"; goalText="目標：60+ dB"; }
+      
+      // 霓虹燈看板
+      drawNeonGoal(goalText, "請維持在目標音量區間擊倒機器人", labelColor);
+      
+      // 即時 dB
+      fill(255); textSize(20); textAlign(LEFT);
+      text(`CURRENT: ${nf(dbSimulated,2,1)} dB`, 20, H-40);
+
+      // 2. 機器人
+      let activeCount = 0;
+      for(let r of l1_robots) {
+        if(r.active) {
+          activeCount++;
+          let fy = sin(frameCount*0.05)*8;
+          push(); translate(r.x, r.y + fy);
+          fill(r.c); noStroke(); rect(0,0,60,60,8);
+          fill(0); rect(-15,-10,10,10); rect(15,-10,10,10); // 眼睛
+          stroke(r.c); line(0,-30,0,-50); fill(255); noStroke(); ellipse(0,-55,6,6);
+          pop();
+        }
+      }
+
+      // 過關判斷
+      if(activeCount === 0) {
+        l1_phase++;
+        if(l1_phase > 2) {
+          textSize(60); fill(0,255,0); text("LEVEL 1 CLEAR!", W/2, H/2);
+          if(drawButton("下一關 >>", W/2, H/2+100, 200, 60, "#0f0")) { initLevel2(); gameState="L2"; }
+          return;
+        }
+        setupL1Robots();
+      }
+
+      // 3. 砲塔邏輯
+      push(); translate(W/2, H-80);
+      l1_turretAngle += 0.02 * l1_turretDir;
+      if(abs(l1_turretAngle)>0.4) l1_turretDir *= -1;
+      rotate(l1_turretAngle);
+      fill(50,100,200); rect(0,0,80,80,15); fill(100,200,255); rect(0,-40,30,60);
+
+      // 發射條件：大於最小目標值
+      if(dbSimulated >= targetMin) {
+        // 能量球
+        let es = map(dbSimulated, targetMin, 100, 20, 80);
+        fill(255,200,50,200); noStroke(); ellipse(0,-80,es,es);
+        
+        // 攻擊判定
+        if(frameCount % 15 === 0 && activeCount > 0) {
+           stroke(255,255,0); strokeWeight(8); line(0,-80,0,-600); // 雷射
+           let idx = l1_robots.findIndex(r => r.active);
+           if(idx !== -1) {
+             l1_robots[idx].active = false;
+             for(let k=0;k<15;k++) createParticle(l1_robots[idx].x, l1_robots[idx].y, l1_robots[idx].c, 8);
+           }
+        }
+      } else if(dbSimulated > 20) {
+        fill(255,0,0); textSize(14); text("TOO LOW", 0, -90);
+      }
+      pop();
+      drawBackButton();
+    }
+
+    // ---------------------------------------
+    // Level 2: Long Voice
+    // ---------------------------------------
+    function initLevel2() { l2_phase = 0; setupL2(); }
+    function setupL2() {
+      l2_timer=0; l2_balloonSize=50; l2_silenceCount=0;
+      if(l2_phase==0) { l2_targetTime=8; }
+      else if(l2_phase==1) { l2_targetTime=10; }
+      else { l2_targetTime=15; }
+    }
+
+    function drawLevel2() {
+      let goalTxt = `維持長音：${l2_targetTime} 秒`;
+      let subTxt = (dbSimulated >= THRESHOLD) ? "很好！保持住！" : "請大聲持續發出「啊——」";
+      let pColor = (l2_phase==0)?"#f00":(l2_phase==1)?"#ff0":"#0ff";
+      drawNeonGoal(goalTxt, subTxt, pColor);
+
+      fill(255); textSize(24); textAlign(LEFT);
+      text(`TIME: ${nf(l2_timer, 1, 2)}s`, 20, H-40);
+
+      // Logic: >= 40 dB 開始計時
+      if(dbSimulated >= THRESHOLD) {
+        l2_silenceCount = 0; // Reset silence
+        l2_timer += deltaTime/1000;
+        
+        // 氣球膨脹
+        let progress = l2_timer / l2_targetTime;
+        l2_balloonSize = map(progress, 0, 1, 50, 350);
+        
+        if(frameCount%5==0) createParticle(W/2, H/2+180, color(255,255,255,100), 3);
+      } else {
+        // 聲音斷掉 logic
+        if(l2_timer > 0) {
+          l2_silenceCount += deltaTime/1000;
+          // 100ms 容錯 (0.1s)
+          if(l2_silenceCount > SILENCE_LIMIT) {
+             // 洩氣
+             l2_balloonSize = max(50, l2_balloonSize - 2);
+             // 停止計時 (但不歸零，只是停住，或是根據需求歸零。通常遊戲性會讓它稍微倒退)
+             // 這裡做簡單的"停止增加"且視覺縮小
+             fill(255,50,50); textSize(20); textAlign(CENTER);
+             text("聲音中斷！氣球漏氣中...", W/2, H/2+220);
+          }
+        }
+      }
+
+      // Draw Balloon
+      let bc = (l2_phase==0)?color(255,100,100):(l2_phase==1)?color(255,200,0):color(0,150,255);
+      noStroke(); fill(bc);
+      let shake = (dbSimulated >= THRESHOLD) ? random(-2,2) : 0;
+      ellipse(W/2+shake, H/2+shake, l2_balloonSize, l2_balloonSize*1.2);
+      stroke(200); strokeWeight(2); line(W/2, H/2+l2_balloonSize*0.6, W/2, H/2+l2_balloonSize*0.6+120);
+
+      // Check Win
+      if(l2_timer >= l2_targetTime) {
+         for(let i=0; i<50; i++) createParticle(W/2, H/2, bc, 12);
+         l2_phase++;
+         if(l2_phase > 2) {
+           textSize(60); fill(0,255,0); text("LEVEL 2 CLEAR!", W/2, H/2);
+           if(drawButton("下一關 >>", W/2, H/2+100, 200, 60, "#0f0")) { initLevel3(); gameState="L3"; }
+           return;
+         }
+         setupL2();
+      }
+      drawBackButton();
+    }
+
+    // ---------------------------------------
+    // Level 3: Speed Challenge (Redesigned)
+    // ---------------------------------------
+    function initLevel3() { l3_phase=0; setupL3(); }
+    function setupL3() {
+      if(l3_phase==0) l3_bpm=60; else if(l3_phase==1) l3_bpm=80; else l3_bpm=100;
+      l3_startTime = millis();
+      l3_lastBeatIdx = -1;
+      l3_missCount = 0;
+      l3_feedback = "";
+    }
+
+    function drawLevel3() {
+      let goalColor = (l3_missCount >= 5) ? "#f00" : "#0ff";
+      let subText = (l3_missCount >= 5) ? "⚠️ 節奏混亂！請聽好拍子！" : "請在圓點亮起時朗讀";
+      drawNeonGoal(`語速挑戰：${l3_bpm} BPM`, subText, goalColor);
+
+      // 計算節拍
+      let interval = 60000 / l3_bpm; // ms per beat
+      let timeElapsed = millis() - l3_startTime;
+      
+      // 6個點代表一個循環 (或 4 個)
+      let beatsPerCycle = 6;
+      let currentBeatIdx = floor(timeElapsed / interval);
+      let slot = currentBeatIdx % beatsPerCycle;
+      
+      // 視覺：6個圓點
+      for(let i=0; i<beatsPerCycle; i++) {
+        let cx = W/2 - ((beatsPerCycle-1)*40)/2 + i*40;
+        let cy = 200;
+        
+        if(i === slot) {
+           // Current active beat
+           fill(0, 255, 0); 
+           drawingContext.shadowBlur = 15; drawingContext.shadowColor = "#0f0";
+           ellipse(cx, cy, 30, 30);
+           drawingContext.shadowBlur = 0;
+        } else {
+           fill(50); noStroke();
+           ellipse(cx, cy, 20, 20);
+        }
+      }
+
+      // 歌詞顯示
+      let lineDur = 4 * interval; 
+      let lineIdx = floor(timeElapsed / lineDur) % l3_lyrics.length;
+      let totalLines = floor(timeElapsed / lineDur);
+      
+      textSize(60); textAlign(CENTER); fill(255);
+      text(l3_lyrics[lineIdx], W/2, H/2 + 50);
+
+      // --- 語音起始偵測 (Onset Detection) ---
+      if(dbSimulated >= THRESHOLD) {
+        if(!l3_isSpeaking) {
+          // 剛開始發聲 (Rising Edge) -> 進行判定
+          l3_isSpeaking = true;
+          
+          // 計算與最近拍點的距離 Δt
+          // progress: 0.0 ~ 1.0 (當前拍子的進度)
+          let progress = (timeElapsed % interval) / interval; 
+          // 轉換成毫秒
+          let diffMs = min(progress * interval, (1 - progress) * interval);
+          
+          if(diffMs < 150) {
+             // 準確
+             l3_feedback = "✨ Perfect! ✨";
+             l3_feedbackColor = color(0, 255, 0);
+             l3_missCount = max(0, l3_missCount - 1); // 表現好扣除錯誤
+             createParticle(W/2, H/2+50, color(0,255,0), 5);
+          } else if (diffMs > 200) {
+             // 誤差太大
+             l3_feedback = "❌ Miss (過快/過慢)";
+             l3_feedbackColor = color(255, 100, 100);
+             l3_missCount++;
+          }
+        }
+      } else {
+        // 聲音低於閾值，重置 speaking flag，允許下一次判定
+        l3_isSpeaking = false;
+      }
+      
+      // 顯示判定結果
+      textSize(30); fill(l3_feedbackColor);
+      text(l3_feedback, W/2, H/2 + 150);
+      
+      // 顯示即時毫秒誤差 (Debug用，或給治療師看)
+      // fill(100); textSize(14); text(`Miss Count: ${l3_missCount}`, W/2, H - 50);
+
+      // 過關邏輯 (念完 2 輪)
+      if(totalLines >= 8) {
+         l3_phase++;
+         if(l3_phase > 2) gameState="END";
+         else setupL3();
+      }
+      
+      drawBackButton();
+    }
+
+    // ==========================================
+    // Helpers
+    // ==========================================
+    function createParticle(x, y, c, s) {
+      particles.push({x:x, y:y, vx:random(-4,4), vy:random(-4,4), life:255, c:c, size:s});
+    }
+    function updateParticles() {
+      for(let i=particles.length-1; i>=0; i--) {
+        let p = particles[i];
+        p.x += p.vx; p.y += p.vy; p.life -= 8;
+        if(p.life <= 0) particles.splice(i,1);
+        else { fill(red(p.c), green(p.c), blue(p.c), p.life); noStroke(); ellipse(p.x, p.y, p.size, p.size); }
+      }
+    }
+  </script>
+</body>
+</html>
